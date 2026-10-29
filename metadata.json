@@ -1,0 +1,6 @@
+{
+  "name": "SpeakEasy — Café Talk",
+  "description": "A beginner English speaking practice app for ordering food and drinks at a café with friendly pedagogical feedback.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
