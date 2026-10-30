@@ -3,12 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Safe helper for Web Speech API SpeechSynthesis and SpeechRecognition
+// Helper for Web Speech API SpeechSynthesis and SpeechRecognition with Noise Suppression
 
 export interface SpeechRecognitionHelper {
   start: () => void;
   stop: () => void;
   abort: () => void;
+}
+
+export interface SpeechRecognitionOptions {
+  silenceTimeoutMs?: number; // silence threshold after speaking (e.g. 3500ms)
+  initialWaitMs?: number; // wait time before any speech starts (e.g. 7000ms)
+  maxDurationMs?: number; // maximum safety timeout (e.g. 15000ms)
 }
 
 export function isSpeechRecognitionSupported(): boolean {
@@ -38,19 +44,18 @@ export function speakText(
   }
 
   try {
-    // Cancel any ongoing speech
     window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-US';
-    utterance.rate = rate; // 0.9 normal or 0.7 slow
+    utterance.rate = rate;
     utterance.pitch = 1.0;
 
-    // Pick a natural English voice if available
     const voices = window.speechSynthesis.getVoices();
-    const enVoice = voices.find(
-      (v) => (v.lang === 'en-US' || v.lang.startsWith('en')) && !v.name.includes('Google')
-    ) || voices.find((v) => v.lang.startsWith('en'));
+    const enVoice =
+      voices.find(
+        (v) => (v.lang === 'en-US' || v.lang.startsWith('en')) && !v.name.includes('Google')
+      ) || voices.find((v) => v.lang.startsWith('en'));
     if (enVoice) {
       utterance.voice = enVoice;
     }
@@ -82,53 +87,124 @@ export function stopSpeaking(): void {
 }
 
 /**
+ * Filters out trivial ambient noise artifacts (e.g., isolated coughs, clicks, single-letter noises)
+ */
+export function filterAmbientNoise(transcript: string): string {
+  if (!transcript) return '';
+  const trimmed = transcript.trim();
+  // Filter out stray single punctuation or solitary acoustic noise tokens
+  if (/^[^a-zA-Z0-9]+$/.test(trimmed)) {
+    return '';
+  }
+  return trimmed;
+}
+
+/**
  * Initializes browser Web Speech API SpeechRecognition
- * Stops listening after ~1.5s silence as required in PRD.
+ * Enhanced with continuous mode, noise suppression constraints, and lengthened silence detection.
  */
 export function createSpeechRecognition(
   onResult: (transcript: string) => void,
   onStatusChange: (status: 'ready' | 'listening' | 'done') => void,
   onError: (errorMessage: string) => void,
-  onComplete?: (finalText: string) => void
+  onComplete?: (finalText: string) => void,
+  options?: SpeechRecognitionOptions
 ): SpeechRecognitionHelper | null {
   if (!isSpeechRecognitionSupported()) {
     return null;
   }
+
+  const silenceTimeoutMs = options?.silenceTimeoutMs ?? 3500; // Increased from 1500ms to 3500ms for natural pauses
+  const initialWaitMs = options?.initialWaitMs ?? 7000; // 7s to start speaking
+  const maxDurationMs = options?.maxDurationMs ?? 15000; // 15s max safety window
 
   const SpeechRecognitionConstructor =
     (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
   const recognition = new SpeechRecognitionConstructor();
   recognition.lang = 'en-US';
-  recognition.continuous = false;
+  recognition.continuous = true; // Continuous listening so speech doesn't cut off on brief pauses
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   let silenceTimer: any = null;
+  let maxDurationTimer: any = null;
   let finalAccumulated = '';
   let isDone = false;
+  let hasUserSpoken = false;
+  let audioStream: MediaStream | null = null;
 
-  const resetSilenceTimer = () => {
-    if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      // 1.5 seconds of silence: stop recognition automatically
+  // Request browser hardware noise suppression & echo cancellation
+  const enableHardwareNoiseSuppression = async () => {
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
-        recognition.stop();
+        audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: true,
+          },
+        });
       } catch (err) {
+        // Fall back gracefully to standard microphone if getUserMedia is denied
+      }
+    }
+  };
+
+  const releaseHardwareNoiseSuppression = () => {
+    if (audioStream) {
+      try {
+        audioStream.getTracks().forEach((track) => track.stop());
+      } catch (e) {
         // ignore
       }
-    }, 1500);
+      audioStream = null;
+    }
+  };
+
+  const clearAllTimers = () => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if (maxDurationTimer) clearTimeout(maxDurationTimer);
+    silenceTimer = null;
+    maxDurationTimer = null;
+  };
+
+  const resetSilenceTimer = (delay: number) => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      // Extended silence reached: safely stop recognition
+      stopRecognition();
+    }, delay);
+  };
+
+  const stopRecognition = () => {
+    clearAllTimers();
+    try {
+      recognition.stop();
+    } catch (err) {
+      // ignore
+    }
   };
 
   recognition.onstart = () => {
     isDone = false;
+    hasUserSpoken = false;
     finalAccumulated = '';
     onStatusChange('listening');
-    resetSilenceTimer();
+
+    // Enable noise suppression
+    enableHardwareNoiseSuppression();
+
+    // Start with initial wait period (7 seconds before first speech)
+    resetSilenceTimer(initialWaitMs);
+
+    // Hard ceiling safety timeout (15 seconds total)
+    maxDurationTimer = setTimeout(() => {
+      stopRecognition();
+    }, maxDurationMs);
   };
 
   recognition.onresult = (event: any) => {
-    resetSilenceTimer();
     let interim = '';
     let finals = '';
     for (let i = 0; i < event.results.length; ++i) {
@@ -139,21 +215,29 @@ export function createSpeechRecognition(
         interim += res[0].transcript + ' ';
       }
     }
-    finalAccumulated = finals.trim();
-    const liveText = (finals + interim).trim();
-    if (liveText) {
-      onResult(liveText);
+
+    const currentLive = (finals + interim).trim();
+    if (currentLive) {
+      hasUserSpoken = true;
+      finalAccumulated = finals.trim() || currentLive;
+      onResult(currentLive);
+      // Once speaking has begun, wait for the extended silence timeout (3.5 seconds)
+      resetSilenceTimer(silenceTimeoutMs);
     }
   };
 
   recognition.onerror = (event: any) => {
-    if (silenceTimer) clearTimeout(silenceTimer);
+    clearAllTimers();
+    releaseHardwareNoiseSuppression();
     console.warn('SpeechRecognition error:', event.error);
     if (event.error === 'not-allowed') {
       onError('Microphone access was denied. Please allow microphone permissions in browser settings.');
     } else if (event.error === 'no-speech') {
       onResult('');
-      if (onComplete) onComplete('');
+      if (onComplete && !isDone) {
+        isDone = true;
+        onComplete('');
+      }
     } else {
       onError(`Speech recognition notice: ${event.error}`);
     }
@@ -161,12 +245,14 @@ export function createSpeechRecognition(
   };
 
   recognition.onend = () => {
-    if (silenceTimer) clearTimeout(silenceTimer);
+    clearAllTimers();
+    releaseHardwareNoiseSuppression();
     if (!isDone) {
       isDone = true;
       onStatusChange('done');
       if (onComplete) {
-        onComplete(finalAccumulated);
+        const cleanText = filterAmbientNoise(finalAccumulated);
+        onComplete(cleanText);
       }
     }
   };
@@ -180,15 +266,11 @@ export function createSpeechRecognition(
       }
     },
     stop: () => {
-      if (silenceTimer) clearTimeout(silenceTimer);
-      try {
-        recognition.stop();
-      } catch (err) {
-        // ignore
-      }
+      stopRecognition();
     },
     abort: () => {
-      if (silenceTimer) clearTimeout(silenceTimer);
+      clearAllTimers();
+      releaseHardwareNoiseSuppression();
       try {
         recognition.abort();
       } catch (err) {

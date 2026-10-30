@@ -16,6 +16,8 @@ import {
   HelpCircle,
   Snail,
   MessageCircle,
+  ShieldCheck,
+  Clock,
 } from 'lucide-react';
 import {
   DIALOGUE_TURNS,
@@ -66,6 +68,8 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const [micError, setMicError] = useState<string | null>(null);
   const [triedSpeakingCurrentTurn, setTriedSpeakingCurrentTurn] = useState<boolean>(false);
   const [history, setHistory] = useState<TurnHistoryItem[]>([]);
+  // Extended recognition timeout: 4000ms default (up to 6000ms relaxed)
+  const [pauseTimeoutMs, setPauseTimeoutMs] = useState<number>(4000);
 
   // Simulation test input toggle
   const [showSimInput, setShowSimInput] = useState<boolean>(false);
@@ -233,6 +237,11 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       },
       (finalText) => {
         processSpokenInput(finalText);
+      },
+      {
+        silenceTimeoutMs: pauseTimeoutMs,
+        initialWaitMs: 8000,
+        maxDurationMs: 20000,
       }
     );
 
@@ -445,8 +454,29 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         </div>
       </div>
 
-      {/* Bottom: Large round [Mic] button with 3 visible states */}
+      {/* Bottom: Large round [Mic] button with 3 visible states & Noise Filter Controls */}
       <div className="flex flex-col items-center">
+        {/* Noise Suppression & Speaking Duration Configuration */}
+        <div className="flex items-center gap-2 mb-3 text-[11px] text-stone-500">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200/80 font-medium">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span>Noise Isolation Active</span>
+          </span>
+          <span aria-hidden="true" className="text-stone-300">·</span>
+          <div className="inline-flex items-center gap-1">
+            <Clock className="w-3 h-3 text-stone-400" />
+            <span>Pause limit:</span>
+            <button
+              onClick={() => setPauseTimeoutMs(pauseTimeoutMs === 4000 ? 6000 : 4000)}
+              disabled={micState === 'listening'}
+              className="font-semibold text-amber-800 hover:text-amber-900 underline underline-offset-2 disabled:opacity-50 cursor-pointer"
+              title="Click to toggle pause duration"
+            >
+              {pauseTimeoutMs / 1000}s ({pauseTimeoutMs === 4000 ? 'Standard' : 'Extended'})
+            </button>
+          </div>
+        </div>
+
         <div className="relative mb-3">
           {/* Pulsing ring when listening */}
           {micState === 'listening' && (
@@ -469,14 +499,15 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
               isAudioPlaying
                 ? 'Microphone disabled while audio is playing'
                 : micState === 'listening'
-                ? 'Stop listening'
+                ? 'Tap to finish speaking'
                 : 'Start speaking'
             }
           >
             {micState === 'listening' ? (
               <>
-                <Mic className="w-7 h-7 md:w-8 md:h-8 animate-bounce mb-1" />
+                <Mic className="w-7 h-7 md:w-8 md:h-8 animate-bounce mb-0.5" />
                 <span className="text-[10px] font-bold tracking-wider uppercase">Listening</span>
+                <span className="text-[9px] text-emerald-100 font-medium opacity-90">Tap when done</span>
               </>
             ) : micState === 'done' ? (
               <>
@@ -493,17 +524,19 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         </div>
 
         {/* State label & audio notification */}
-        <span className="text-xs text-stone-500 font-medium">
+        <span className="text-xs text-stone-500 font-medium text-center max-w-sm">
           {isAudioPlaying ? (
-            <span className="text-amber-800 flex items-center gap-1">
+            <span className="text-amber-800 flex items-center justify-center gap-1">
               <Volume2 className="w-3.5 h-3.5" /> Audio playing (mic disabled)
             </span>
           ) : micState === 'listening' ? (
-            'Listening... (auto stops after silence)'
+            <span className="text-emerald-700 font-medium">
+              Listening... Speak at your pace ({pauseTimeoutMs / 1000}s pause allowance), or tap button when finished.
+            </span>
           ) : micState === 'done' ? (
             'Speech processed'
           ) : (
-            'Tap [Mic] (Ready) to speak'
+            `Tap [Mic] (Ready) to speak · ${pauseTimeoutMs / 1000}s pause tolerance & noise filter on`
           )}
         </span>
       </div>
